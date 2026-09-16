@@ -47,6 +47,7 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
         llm_models: str = "",
         system_prompt: str = "",
         permission: dict | None = None,
+        artifact_timeout_s: float = 300.0,
     ):
         self.agent_id = agent_id
         self.runtime = runtime
@@ -63,7 +64,7 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
         llm_models = llm_models or read_llm_models(self.install_dir) or ""
         permission = permission or read_permission(self.install_dir)
         self.client = EdgeRestClient(
-            orchestrator_url.replace("/mcp", ""), token
+            orchestrator_url.replace("/mcp", ""), token, artifact_timeout_s
         )
         self.executor = Executor(
             runtime=runtime,
@@ -220,6 +221,8 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
             self.executor.llm_models = parse_model_list(config.get("llm_models") or "")
         if "permission" in config:
             self.executor.permission = config.get("permission")
+        if config.get("artifact_timeout_s"):
+            self.client.set_artifact_timeout(config.get("artifact_timeout_s"))
         apply_llm_config(self.install_dir, config, str(config_version))
         logger.info(
             "applied LLM config v%s (model=%s base_url=%s)",
@@ -281,6 +284,7 @@ def main() -> None:
         install_dir=cfg.install_dir,
         llm_models=cfg.llm_models,
         system_prompt=cfg.system_prompt,
+        artifact_timeout_s=cfg.artifact_timeout_s,
     )
     asyncio.run(agent.run())
 

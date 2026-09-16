@@ -14,13 +14,25 @@ class EdgeRestClient:
     This deliberately avoids MCP; edge agents use simple HTTPS + Bearer auth.
     """
 
-    def __init__(self, base_url: str, token: str):
+    def __init__(
+        self, base_url: str, token: str, artifact_timeout_s: float = 300.0
+    ):
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self._artifact_timeout = httpx.Timeout(artifact_timeout_s)
         self._client = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {token}"},
             timeout=httpx.Timeout(30.0),
         )
+
+    def set_artifact_timeout(self, seconds: float) -> None:
+        """Set the timeout used for artifact uploads (from config-sync)."""
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            self._artifact_timeout = httpx.Timeout(value)
 
     def set_token(self, token: str) -> None:
         """Switch the bearer token used for all requests (e.g. after the
@@ -38,7 +50,10 @@ class EdgeRestClient:
         url = f"{self.base_url}/api/artifacts/{task_id}"
         multipart = [("files", (name, content, "application/octet-stream")) for name, content in files]
         resp = await self._client.post(
-            url, files=multipart, headers={"Authorization": f"Bearer {self.token}"}
+            url,
+            files=multipart,
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=self._artifact_timeout,
         )
         resp.raise_for_status()
         return resp.json()

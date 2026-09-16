@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,3 +31,14 @@ class EdgeConfig(BaseSettings):
     llm_models: str = ""
     # Node-level role/context injected at the top of every llm task prompt.
     system_prompt: str = ""
+    # HTTP timeout for artifact uploads (seconds). Larger artifacts need more
+    # time; overridden at runtime by the orchestrator's config-sync.
+    artifact_timeout_s: float = 300.0
+
+    @field_validator("artifact_timeout_s", mode="before")
+    @classmethod
+    def _default_timeout(cls, value: object) -> object:
+        # edge.env may carry an empty value (older config-writer); fall back.
+        if value is None or value == "":
+            return 300.0
+        return value
