@@ -10,6 +10,21 @@ from agent_mesh.shared.schemas import ArtifactRef, Task
 logger = logging.getLogger(__name__)
 
 
+def _artifact_error_reason(exc: Exception) -> str:
+    """Human-readable reason for an artifact upload failure."""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        detail = ""
+        try:
+            body = response.json()
+            detail = str(body.get("detail") or body) if isinstance(body, dict) else str(body)
+        except Exception:
+            detail = (getattr(response, "text", "") or "").strip()
+        prefix = f"HTTP {response.status_code}"
+        return f"{prefix}: {detail[:300]}" if detail else prefix
+    return str(exc)[:300] or exc.__class__.__name__
+
+
 class TaskRunnerMixin:
     """Claimed-task lifecycle: attachments, execution, artifact upload, cancel."""
 
@@ -104,6 +119,7 @@ class TaskRunnerMixin:
 
             # Collect artifacts from workdir.
             artifact_files: list[tuple[str, bytes]] = []
+            artifact_errors: list[str] = []
             for f in outcome.artifacts_paths:
                 p = workdir / f
                 if p.exists() and p.is_file():
@@ -111,6 +127,7 @@ class TaskRunnerMixin:
                         artifact_files.append((p.name, p.read_bytes()))
                     except Exception as e:
                         logger.warning("cannot read artifact %s: %s", p, e)
+                        artifact_errors.append(f"cannot read artifact {p.name}: {e}")
             if artifact_files:
                 try:
                     upload_resp = await self.client.upload_artifacts(
@@ -121,9 +138,26 @@ class TaskRunnerMixin:
                         ArtifactRef(**r) for r in refs
                     ]
                 except Exception as e:
-                    logger.warning("artifact upload failed: %s", e)
+                    reason = _artifact_error_reason(e)
+                    logger.warning("artifact upload failed for %s: %s", task.task_id, reason)
+                    artifact_errors.append(f"artifact upload failed: {reason}")
 
             result = self.executor.build_task_result(outcome)
+            if artifact_errors:
+                # Never drop artifacts silently: surface why in the task log and
+                # in the submitted result.
+                note = "; ".join(artifact_errors)
+                try:
+                    await _report_logs(
+                        [{"kind": "text", "content": f"[artifact] {note}"}]
+                    )
+                except Exception:
+                    logger.debug("artifact failure log upload failed", exc_info=True)
+                result.stderr_tail = (
+                    f"{result.stderr_tail}\n{note}" if result.stderr_tail else note
+                )
+                result.summary = f"{result.summary} | {note}" if result.summary else note
+
             await self.client.submit_result(
                 task_id=task.task_id,
                 agent_id=self.agent_id,

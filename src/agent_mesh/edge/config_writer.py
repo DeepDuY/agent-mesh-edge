@@ -193,6 +193,7 @@ _EDGE_ENV_LLM_KEYS = {
     "EDGE_LLM_API_KEY": "llm_api_key",
     "EDGE_LLM_BASE_URL": "llm_base_url",
     "EDGE_LLM_MODEL": "llm_model",
+    "EDGE_ARTIFACT_TIMEOUT_S": "artifact_timeout_s",
 }
 
 
