@@ -312,7 +312,9 @@ def read_edge_token(install_dir: str) -> str | None:
 WRAPPER_SCRIPT = r"""#!/usr/bin/env bash
 set -e
 cd "$(dirname "$0")/.."
+set -a
 source "$PWD/etc/edge.env"
+set +a
 export PATH="$PWD/bin:$PATH"
 BIN="$PWD/bin/agent-mesh-edge.bin"
 OLD="$PWD/bin/agent-mesh-edge.bin.old"

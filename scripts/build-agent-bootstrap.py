@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
-"""Build a self-contained agent bootstrap package for Linux/macOS.
+"""Build the self-contained no-systemd agent package for Linux/macOS.
 
 Run on a build machine; `opencode` is bundled so target machines need no
 internet / no manual install. If opencode is not installed locally it is
 downloaded automatically from the official releases
 (github.com/sst/opencode/releases/latest). Produces:
 
-    <output-dir>/agent-mesh-agent-{linux|darwin}-{x64|arm64}.tar.gz
-    <output-dir>/install.sh
+    <output-dir>/agent-mesh-edge-nosystemd-<VERSION>.tar.gz
+    <output-dir>/install-nosystemd.sh
     <output-dir>/VERSION
 
 The package contains:
-    bin/agent-mesh-edge   PyInstaller-built edge agent binary
-    bin/opencode          opencode CLI binary (REQUIRED for llm tasks)
-    install.sh            one-command installer
+    bin/agent-mesh-edge.bin   PyInstaller-built edge agent binary
+    bin/agent-mesh-edge       rollback-aware wrapper (loads etc/edge.env)
+    bin/opencode              opencode CLI binary (REQUIRED for llm tasks)
+    install-nosystemd.sh      one-command installer (boot+login autostart)
+    start.sh stop.sh status.sh keepalive.sh
     VERSION
 
 Usage:
     python scripts/build-agent-bootstrap.py
     python scripts/build-agent-bootstrap.py --opencode /path/to/opencode
-    python scripts/build-agent-bootstrap.py --output-dir /opt/agent-mesh/data/bootstrap
+    python scripts/build-agent-bootstrap.py --output-dir ./dist
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import platform
 import shutil
@@ -218,16 +219,27 @@ def build(
 
     exe = _build_binary()
 
+    # no-systemd special build: install-nosystemd.sh expects the real binary as
+    # ``bin/agent-mesh-edge.bin`` plus the rollback-aware wrapper
+    # ``bin/agent-mesh-edge``, and the helper scripts next to the installer.
+    from agent_mesh.edge.config_writer import WRAPPER_SCRIPT
+    from agent_mesh.shared.constants import VERSION
+
+    pkg_name = f"agent-mesh-edge-nosystemd-{VERSION}"
+
     with tempfile.TemporaryDirectory(prefix="agent-bootstrap-") as td:
         work = Path(td)
-        pkg = work / f"agent-mesh-agent-{os_name}-{arch}"
+        pkg = work / pkg_name
         pkg.mkdir()
         bin_dir = pkg / "bin"
         bin_dir.mkdir()
 
-        # Copy PyInstaller binary.
-        shutil.copy2(exe, bin_dir / "agent-mesh-edge")
-        os.chmod(bin_dir / "agent-mesh-edge", 0o755)
+        # Real binary + wrapper (wrapper loads edge.env and handles rollback).
+        shutil.copy2(exe, bin_dir / "agent-mesh-edge.bin")
+        os.chmod(bin_dir / "agent-mesh-edge.bin", 0o755)
+        wrapper = bin_dir / "agent-mesh-edge"
+        wrapper.write_text(WRAPPER_SCRIPT, encoding="utf-8")
+        os.chmod(wrapper, 0o755)
 
         # Copy opencode binary (REQUIRED unless explicitly skipped).
         if opencode_path is not None:
@@ -235,50 +247,38 @@ def build(
             os.chmod(bin_dir / "opencode", 0o755)
             print(f"bundled opencode from {opencode_path}")
 
-        # Copy install.sh from data/bootstrap (canonical version).
-        install_src = PROJECT_ROOT / "bootstrap" / "install.sh"
-        if install_src.exists():
-            shutil.copy2(install_src, pkg / "install.sh")
-            os.chmod(pkg / "install.sh", 0o755)
-        else:
-            raise SystemExit(
-                f"ERROR: {install_src} not found; cannot build a package without the installer"
-            )
+        # Installer + helper scripts (install-nosystemd.sh copies these).
+        for name in (
+            "install-nosystemd.sh",
+            "start.sh",
+            "stop.sh",
+            "status.sh",
+            "keepalive.sh",
+        ):
+            src = PROJECT_ROOT / "bootstrap" / name
+            if not src.exists():
+                raise SystemExit(f"ERROR: {src} not found; cannot build the nosystemd package")
+            shutil.copy2(src, pkg / name)
+            os.chmod(pkg / name, 0o755)
+        readme = PROJECT_ROOT / "bootstrap" / "README-nosystemd.md"
+        if readme.exists():
+            shutil.copy2(readme, pkg / "README.md")
 
-        # Write the version manifest into the package and the output dir.
-        # The orchestrator reads <data_dir>/bootstrap/VERSION to decide whether an
+        # Write the version into the package and the output dir. The
+        # orchestrator reads <data_dir>/bootstrap/VERSION to decide whether an
         # edge agent's reported version is stale (see orchestrator/api/edge.py).
-        from agent_mesh.shared.constants import VERSION
-
         (pkg / "VERSION").write_text(VERSION, encoding="utf-8")
         (bootstrap_dir / "VERSION").write_text(VERSION, encoding="utf-8")
         print(f"wrote VERSION={VERSION} to {bootstrap_dir / 'VERSION'}")
 
-        # MANIFEST.json: lets the edge upgrade path skip re-extracting unchanged
-        # large members (notably the ~180MB opencode binary) instead of unpacking
-        # the whole archive on every upgrade.
-        manifest_files: dict[str, dict[str, object]] = {}
-        for rel in ("bin/agent-mesh-edge", "bin/opencode"):
-            fp = pkg / rel
-            if fp.exists():
-                manifest_files[rel] = {
-                    "size": fp.stat().st_size,
-                    "sha256": _sha256(fp),
-                }
-        manifest = {"version": VERSION, "files": manifest_files}
-        (pkg / "MANIFEST.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        print("wrote MANIFEST.json")
-
         # Build tar.gz.
-        tar_name = f"agent-mesh-agent-{os_name}-{arch}.tar.gz"
+        tar_name = f"{pkg_name}.tar.gz"
         tar_path = bootstrap_dir / tar_name
-        _run(["tar", "-czf", str(tar_path), "-C", str(work), pkg.name])
+        _run(["tar", "-czf", str(tar_path), "-C", str(work), pkg_name])
         print(f"created {tar_path}")
 
-        # Also keep a copy of install.sh at bootstrap root for direct curl.
-        shutil.copy2(pkg / "install.sh", bootstrap_dir / "install.sh")
+        # Also keep a copy of the installer for direct use.
+        shutil.copy2(pkg / "install-nosystemd.sh", bootstrap_dir / "install-nosystemd.sh")
         return tar_path
 
 

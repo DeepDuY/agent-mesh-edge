@@ -1,6 +1,6 @@
 import enum
 
-VERSION = "1.6.3"          # edge probe / bootstrap package version
+VERSION = "1.6.3-docker"   # edge probe / bootstrap package version
 SERVER_VERSION = "1.7.0"   # orchestrator (server) version
 
 # Initial gateway model ids seeded into `settings.llm_models` on a fresh

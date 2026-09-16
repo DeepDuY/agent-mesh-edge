@@ -26,13 +26,15 @@ VERSION                  probe version (also embedded in the package)
 ## Build
 
 ```sh
-python scripts/build-agent-bootstrap.py            # -> dist/agent-mesh-agent-<os>-<arch>.tar.gz
+python scripts/build-agent-bootstrap.py            # -> dist/agent-mesh-edge-nosystemd-<VERSION>.tar.gz
 python scripts/build-agent-bootstrap.py --opencode /path/to/opencode
 ```
 
 The script downloads `opencode` automatically when it is not installed locally.
-The resulting tarball is uploaded to the orchestrator (admin console
-`POST /api/bootstrap`) or copied to `/opt/agent-mesh/data/bootstrap/`.
+The resulting package bundles `install-nosystemd.sh` + `start.sh`/`stop.sh`/
+`status.sh`/`keepalive.sh` and is distributed manually (e.g. copied to the
+microVM management platform); it is not uploaded to the orchestrator bootstrap
+endpoint.
 
 ## Notes
 
