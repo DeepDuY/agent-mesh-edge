@@ -43,6 +43,7 @@ class Executor:
         system_prompt: str = "",
         llm_models: list[str] | None = None,
         permission: dict | None = None,
+        shell: str = "",
     ):
         self.runtime = runtime
         self.llm_api_key = llm_api_key
@@ -54,6 +55,7 @@ class Executor:
         self.system_prompt = system_prompt or ""
         self.llm_models = list(llm_models or [])
         self.permission = permission
+        self.shell = shell or ""
 
     async def run_task(
         self, task: Task, cancel_event: asyncio.Event | None = None,
@@ -64,7 +66,7 @@ class Executor:
         if task.mode == "command":
             return await run_command(
                 task, workdir, cancel_event, log_callback,
-                permission=self.permission,
+                permission=self.permission, shell=self.shell,
             )
         return await run_llm(
             task, workdir, self.runtime, self.llm_api_key, self.llm_base_url,

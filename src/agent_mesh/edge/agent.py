@@ -6,6 +6,7 @@ import os
 import signal
 from pathlib import Path
 
+from agent_mesh.edge.config import default_install_dir
 from agent_mesh.edge.config_writer import (
     apply_llm_config,
     get_arch,
@@ -48,12 +49,13 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
         system_prompt: str = "",
         permission: dict | None = None,
         artifact_timeout_s: float = 300.0,
+        shell: str = "",
     ):
         self.agent_id = agent_id
         self.runtime = runtime
         self.workdir = workdir
         self.heartbeat_s = heartbeat_s
-        self.install_dir = install_dir or "/opt/agent-mesh-agent"
+        self.install_dir = install_dir or default_install_dir()
         self.version = read_agent_version(self.install_dir) or VERSION
         # If edge.env already carries this agent's own token (persisted after
         # first registration), prefer it over the bootstrap credential.
@@ -77,6 +79,7 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
             system_prompt=system_prompt,
             llm_models=parse_model_list(llm_models),
             permission=permission,
+            shell=shell,
         )
         self._stop_event = asyncio.Event()
         self._last_cpu_sample = None
@@ -90,8 +93,17 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
 
     async def run(self) -> None:
         loop = asyncio.get_event_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, self._request_stop)
+        try:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, self._request_stop)
+        except (NotImplementedError, RuntimeError):
+            # Windows (Proactor loop) and non-main-thread loops do not support
+            # add_signal_handler; fall back to plain signal handlers.
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    signal.signal(sig, lambda *_: self._request_stop())
+                except (ValueError, OSError, AttributeError):
+                    pass
 
         logger.info("edge agent %s starting (version=%s)", self.agent_id, self.version)
         try:
@@ -285,6 +297,7 @@ def main() -> None:
         llm_models=cfg.llm_models,
         system_prompt=cfg.system_prompt,
         artifact_timeout_s=cfg.artifact_timeout_s,
+        shell=cfg.shell,
     )
     asyncio.run(agent.run())
 

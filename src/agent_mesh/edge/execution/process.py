@@ -3,10 +3,43 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import signal
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_IS_WINDOWS = os.name == "nt"
+
+_POWERSHELL_NAMES = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+
+
+def _shell_basename(exe: str) -> str:
+    """Basename of a shell path, accepting both / and \\ separators.
+
+    ``os.path.basename`` only understands the host separator, so a Windows path
+    (``C:\\pwsh\\pwsh.exe``) is not split when this runs on POSIX.
+    """
+    return exe.replace("\\", "/").rsplit("/", 1)[-1].strip().lower()
+
+
+def shell_command(instruction: str, shell: str = "") -> list[str]:
+    """Build the argv used to run a command-mode instruction on this platform.
+
+    ``shell`` (``EDGE_SHELL``) is an optional override: a shell name/path, or
+    ``powershell``/``pwsh`` on Windows. When empty the platform default is used
+    (``cmd.exe`` on Windows, ``bash`` with an ``sh`` fallback on POSIX).
+    """
+    configured = (shell or "").strip()
+    if _IS_WINDOWS:
+        exe = configured or "cmd"
+        if _shell_basename(exe) in _POWERSHELL_NAMES:
+            return [exe, "-NoProfile", "-NonInteractive", "-Command", instruction]
+        return [exe, "/d", "/s", "/c", instruction]
+    exe = configured or "bash"
+    if not configured and shutil.which(exe) is None:
+        exe = "sh"
+    return [exe, "-c", instruction]
 
 
 def spawn_kwargs() -> dict:
@@ -54,8 +87,40 @@ def _proc_pgid(proc: asyncio.subprocess.Process) -> int | None:
         return None
 
 
+def _signal_tree_windows(proc: asyncio.subprocess.Process, force: bool) -> None:
+    """Terminate a task's whole process tree on Windows.
+
+    Windows has no process groups / ``killpg`` (and no ``SIGKILL``); without
+    walking the tree only the top-level process (the shell) dies and children
+    such as opencode's tool subprocesses keep running. psutil walks children
+    recursively. ``force`` maps to psutil's kill() vs terminate().
+    """
+    try:
+        import psutil  # local import: optional at runtime, bundled by PyInstaller
+    except Exception:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return
+    try:
+        root = psutil.Process(proc.pid)
+    except psutil.NoSuchProcess:
+        return
+    procs = root.children(recursive=True)
+    procs.append(root)
+    for p in procs:
+        try:
+            if force:
+                p.kill()
+            else:
+                p.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            pass
+
+
 def _signal_group(proc: asyncio.subprocess.Process, pgid: int | None, sig: int) -> None:
-    """Send a signal to the task's whole process group when possible."""
+    """Send a signal to the task's whole process group when possible (POSIX)."""
     if pgid is not None:
         try:
             os.killpg(pgid, sig)
@@ -79,14 +144,23 @@ async def _terminate_proc(proc: asyncio.subprocess.Process, grace_s: float = 3.0
     """
     if proc.returncode is not None:
         return
-    pgid = _proc_pgid(proc)
-    _signal_group(proc, pgid, signal.SIGTERM)
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=grace_s)
-        return
-    except asyncio.TimeoutError:
-        pass
-    _signal_group(proc, pgid, signal.SIGKILL)
+    if _IS_WINDOWS:
+        _signal_tree_windows(proc, force=False)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_s)
+            return
+        except asyncio.TimeoutError:
+            pass
+        _signal_tree_windows(proc, force=True)
+    else:
+        pgid = _proc_pgid(proc)
+        _signal_group(proc, pgid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace_s)
+            return
+        except asyncio.TimeoutError:
+            pass
+        _signal_group(proc, pgid, signal.SIGKILL)
     try:
         await asyncio.wait_for(proc.wait(), timeout=5)
     except asyncio.TimeoutError:

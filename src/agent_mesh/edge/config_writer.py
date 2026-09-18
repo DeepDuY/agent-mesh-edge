@@ -155,13 +155,18 @@ def _parse_os_release(text: str) -> str | None:
 
 
 def get_distro() -> str | None:
-    """Linux distribution name + version, e.g. ``"ubuntu 22.04"``.
+    """Platform distribution name + version, e.g. ``"ubuntu 22.04"``.
 
-    Only populated on Linux (from ``/etc/os-release``); returns ``None`` on
-    other platforms or when the file is unreadable/unparseable so callers can
-    fall back to the platform family from :func:`get_os`.
+    Linux is parsed from ``/etc/os-release``; Windows reports the OS release
+    (from ``platform.win32_ver``). Returns ``None`` on other platforms or when
+    unavailable so callers fall back to the platform family from :func:`get_os`.
     """
-    if platform.system().lower() != "linux":
+    system = platform.system().lower()
+    if system == "windows":
+        release, version, _csd, _ptype = platform.win32_ver()
+        label = " ".join(p for p in (release, version) if p).strip()
+        return f"windows {label}".strip() or "windows"
+    if system != "linux":
         return None
     try:
         text = Path("/etc/os-release").read_text(encoding="utf-8")

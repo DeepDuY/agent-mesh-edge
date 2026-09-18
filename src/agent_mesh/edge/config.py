@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import os
+import platform
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def default_install_dir() -> str:
+    """Per-platform default install root (POSIX vs Windows)."""
+    if os.name == "nt":
+        return r"C:\ProgramData\agent-mesh-agent"
+    return "/opt/agent-mesh-agent"
 
 
 class EdgeConfig(BaseSettings):
@@ -14,14 +22,17 @@ class EdgeConfig(BaseSettings):
         extra="ignore",
     )
 
-    agent_id: str = Field(default_factory=lambda: os.uname().nodename)
+    agent_id: str = Field(default_factory=platform.node)
     orchestrator_url: str = "http://127.0.0.1:8000"
     # Empty means "not configured"; edge/agent.py treats "" as the sentinel.
     token: str = ""
     heartbeat_s: float = 3.0
     runtime: str = "opencode"
+    # Command-mode shell. Empty = platform default (bash/sh on POSIX,
+    # cmd.exe on Windows; pass "powershell"/"pwsh" for PowerShell).
+    shell: str = ""
     workdir: str = "."
-    install_dir: str = "/opt/agent-mesh-agent"
+    install_dir: str = Field(default_factory=default_install_dir)
     llm_api_key: str = ""
     llm_base_url: str = ""
     # No hardcoded model default: must be configured (or passed per task).

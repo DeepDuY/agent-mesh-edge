@@ -11,6 +11,7 @@ from agent_mesh.edge.execution.process import (
     _read_stream,
     _tail,
     _wait_proc,
+    shell_command,
     spawn_kwargs,
 )
 from agent_mesh.edge.execution.workspace import _collect_artifacts, _snapshot_files
@@ -25,6 +26,7 @@ async def run_command(
     cancel_event: asyncio.Event | None = None,
     log_callback=None,
     permission: dict | None = None,
+    shell: str = "",
 ) -> ExecutionOutcome:
     # Command mode does not go through OpenCode, so the shared permission policy
     # is evaluated here before the shell is spawned. Any sub-command that is not
@@ -50,7 +52,7 @@ async def run_command(
     pre_snapshot = _snapshot_files(workdir)
     start = datetime.now(timezone.utc)
 
-    cmd = ["bash", "-c", task.instruction]
+    cmd = shell_command(task.instruction, shell)
     logger.info("executing command task=%s cmd=%s workdir=%s", task.task_id, cmd, workdir)
 
     try:
@@ -62,7 +64,7 @@ async def run_command(
             **spawn_kwargs(),
         )
     except FileNotFoundError as e:
-        return _error_outcome("command", f"bash not found: {e}")
+        return _error_outcome("command", f"command shell not found: {e}")
 
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []

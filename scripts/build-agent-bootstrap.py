@@ -50,6 +50,8 @@ _OPENCODE_ASSETS = {
     ("linux", "arm64"): "opencode-linux-arm64.tar.gz",
     ("darwin", "x64"): "opencode-darwin-x64.zip",
     ("darwin", "arm64"): "opencode-darwin-arm64.zip",
+    ("win32", "x64"): "opencode-windows-x64.zip",
+    ("win32", "arm64"): "opencode-windows-arm64.zip",
 }
 _OPENCODE_DOWNLOAD_BASE = os.environ.get(
     "OPENCODE_DOWNLOAD_BASE",
@@ -73,8 +75,14 @@ def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def _find_opencode(explicit: str | None = None) -> Path | None:
-    """Locate a locally installed opencode CLI, in preference order."""
+def _find_opencode(explicit: str | None = None, os_name: str = "linux") -> Path | None:
+    """Locate a locally installed opencode CLI, in preference order.
+
+    When building for ``win32``, non-``.exe`` candidates are skipped so the
+    host's POSIX binary is never bundled under the name ``opencode.exe``
+    (PyInstaller cannot cross-compile anyway, so the intended binary must be a
+    Windows one).
+    """
     candidates: list[Path] = []
     if explicit:
         p = Path(explicit)
@@ -92,9 +100,13 @@ def _find_opencode(explicit: str | None = None) -> Path | None:
         Path.home() / ".opencode" / "bin" / "opencode.exe",
         Path("/opt/agent-mesh-agent/bin/opencode"),
     ]
+    want_exe = os_name == "win32"
     for c in candidates:
-        if c and c.exists():
-            return c
+        if not c or not c.exists():
+            continue
+        if want_exe and not explicit and c.suffix.lower() != ".exe":
+            continue
+        return c
     return None
 
 
@@ -136,7 +148,8 @@ def _download_opencode(os_name: str, arch: str) -> Path | None:
         print(f"WARNING: failed to extract opencode archive: {e}")
         return None
 
-    for p in sorted(extract.rglob("opencode")):
+    wanted = "opencode.exe" if os_name == "win32" else "opencode"
+    for p in sorted(extract.rglob(wanted)):
         if p.is_file():
             os.chmod(p, 0o755)
             return p
@@ -150,6 +163,8 @@ def _detect_target() -> tuple[str, str]:
     machine = platform.machine().lower()
     if system == "darwin":
         os_name = "darwin"
+    elif system == "windows":
+        os_name = "win32"
     else:
         os_name = "linux"
     if machine in ("arm64", "aarch64"):
@@ -159,7 +174,13 @@ def _detect_target() -> tuple[str, str]:
     return os_name, arch
 
 
-def _build_binary() -> Path:
+def _bin_names(os_name: str) -> tuple[str, str]:
+    """Package member names for the edge binary and opencode on ``os_name``."""
+    suffix = ".exe" if os_name == "win32" else ""
+    return f"agent-mesh-edge{suffix}", f"opencode{suffix}"
+
+
+def _build_binary(os_name: str) -> Path:
     """Build the PyInstaller binary for the edge agent.
 
     Uses the currently-running interpreter's PyInstaller (``sys.executable
@@ -167,6 +188,9 @@ def _build_binary() -> Path:
     the environment and can attempt a source build of ``asyncpg`` (no prebuilt
     wheel) that fails under conda-injected compiler flags. Requires pyinstaller
     installed in the running environment (dev extra: ``uv pip install pyinstaller``).
+
+    PyInstaller cannot cross-compile: the Windows package must be built on a
+    Windows host (where this script appends ``.exe`` automatically).
     """
     spec = PROJECT_ROOT / "scripts" / "agent-mesh-edge.spec"
     _run([
@@ -177,9 +201,10 @@ def _build_binary() -> Path:
         "--noconfirm",
     ])
 
-    exe = DIST_DIR / "agent-mesh-edge"
+    edge_name, _ = _bin_names(os_name)
+    exe = DIST_DIR / edge_name
     if not exe.exists():
-        raise RuntimeError("PyInstaller did not produce dist/agent-mesh-edge")
+        raise RuntimeError(f"PyInstaller did not produce dist/{edge_name}")
     return exe
 
 
@@ -197,7 +222,7 @@ def build(
     bootstrap_dir = Path(output_dir).expanduser().resolve() if output_dir else DEFAULT_BOOTSTRAP_DIR
     bootstrap_dir.mkdir(parents=True, exist_ok=True)
 
-    opencode_path = _find_opencode(opencode)
+    opencode_path = _find_opencode(opencode, os_name)
     if opencode_path is None and download_opencode:
         # Not installed locally -> fetch the official binary for the target platform.
         opencode_path = _download_opencode(os_name, arch)
@@ -216,7 +241,8 @@ def build(
     if opencode_path is None:
         print("WARNING: building WITHOUT opencode (--allow-missing-opencode); llm tasks will fail")
 
-    exe = _build_binary()
+    exe = _build_binary(os_name)
+    edge_name, oc_name = _bin_names(os_name)
 
     with tempfile.TemporaryDirectory(prefix="agent-bootstrap-") as td:
         work = Path(td)
@@ -225,25 +251,36 @@ def build(
         bin_dir = pkg / "bin"
         bin_dir.mkdir()
 
-        # Copy PyInstaller binary.
-        shutil.copy2(exe, bin_dir / "agent-mesh-edge")
-        os.chmod(bin_dir / "agent-mesh-edge", 0o755)
+        # Copy PyInstaller binary (agent-mesh-edge / agent-mesh-edge.exe).
+        shutil.copy2(exe, bin_dir / edge_name)
+        os.chmod(bin_dir / edge_name, 0o755)
 
         # Copy opencode binary (REQUIRED unless explicitly skipped).
         if opencode_path is not None:
-            shutil.copy2(opencode_path, bin_dir / "opencode")
-            os.chmod(bin_dir / "opencode", 0o755)
+            shutil.copy2(opencode_path, bin_dir / oc_name)
+            os.chmod(bin_dir / oc_name, 0o755)
             print(f"bundled opencode from {opencode_path}")
 
-        # Copy install.sh from data/bootstrap (canonical version).
-        install_src = PROJECT_ROOT / "bootstrap" / "install.sh"
+        # Copy the platform installer from bootstrap/ (canonical version).
+        installer = "install.ps1" if os_name == "win32" else "install.sh"
+        install_src = PROJECT_ROOT / "bootstrap" / installer
         if install_src.exists():
-            shutil.copy2(install_src, pkg / "install.sh")
-            os.chmod(pkg / "install.sh", 0o755)
+            shutil.copy2(install_src, pkg / installer)
+            os.chmod(pkg / installer, 0o755)
         else:
             raise SystemExit(
                 f"ERROR: {install_src} not found; cannot build a package without the installer"
             )
+
+        # Windows also ships the keepalive launcher next to the installer
+        # (install.ps1 copies it into <install>\bin\ for the Scheduled Task).
+        if os_name == "win32":
+            launcher_src = PROJECT_ROOT / "bootstrap" / "agent-mesh-edge.cmd"
+            if not launcher_src.exists():
+                raise SystemExit(
+                    f"ERROR: {launcher_src} not found; cannot build a Windows package"
+                )
+            shutil.copy2(launcher_src, pkg / "agent-mesh-edge.cmd")
 
         # Write the version manifest into the package and the output dir.
         # The orchestrator reads <data_dir>/bootstrap/VERSION to decide whether an
@@ -258,7 +295,7 @@ def build(
         # large members (notably the ~180MB opencode binary) instead of unpacking
         # the whole archive on every upgrade.
         manifest_files: dict[str, dict[str, object]] = {}
-        for rel in ("bin/agent-mesh-edge", "bin/opencode"):
+        for rel in (f"bin/{edge_name}", f"bin/{oc_name}"):
             fp = pkg / rel
             if fp.exists():
                 manifest_files[rel] = {
@@ -271,20 +308,22 @@ def build(
         )
         print("wrote MANIFEST.json")
 
-        # Build tar.gz.
+        # Build tar.gz with Python's tarfile so packaging works on every host
+        # (Windows has no reliable external `tar`).
         tar_name = f"agent-mesh-agent-{os_name}-{arch}.tar.gz"
         tar_path = bootstrap_dir / tar_name
-        _run(["tar", "-czf", str(tar_path), "-C", str(work), pkg.name])
+        with tarfile.open(tar_path, "w:gz") as tf:
+            tf.add(pkg, arcname=pkg.name)
         print(f"created {tar_path}")
 
-        # Also keep a copy of install.sh at bootstrap root for direct curl.
-        shutil.copy2(pkg / "install.sh", bootstrap_dir / "install.sh")
+        # Also keep a copy of the installer at bootstrap root for direct use.
+        shutil.copy2(pkg / installer, bootstrap_dir / installer)
         return tar_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the agent-mesh edge bootstrap package")
-    parser.add_argument("--os", dest="os_name", default=None, help="target OS (linux/darwin)")
+    parser.add_argument("--os", dest="os_name", default=None, help="target OS (linux/darwin/win32)")
     parser.add_argument("--arch", default=None, help="target arch (x64/arm64)")
     parser.add_argument("--opencode", default=None, help="path to the opencode binary to bundle")
     parser.add_argument(
