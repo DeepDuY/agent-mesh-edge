@@ -25,14 +25,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # Linux is built inside manylinux2014 (CentOS 7, glibc 2.17) on purpose.
+  # PyInstaller freezes the build host's libpython, so building on the default
+  # ubuntu-latest image (glibc 2.39) makes the probe require GLIBC_2.38 and
+  # aborts on older nodes with "Failed to load ... libpython3.12.so.1.0".
+  build-linux:
+    name: build linux-x64
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux2014_x86_64
+    env:
+      PYTHONPATH: src
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: /opt/python/cp312-cp312/bin/python -m pip install --upgrade pip pyinstaller httpx pydantic pydantic-settings psutil
+
+      - name: Build probe package
+        run: /opt/python/cp312-cp312/bin/python scripts/build-agent-bootstrap.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-linux-x64
+          path: dist/agent-mesh-agent-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-native:
     name: build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, name: linux-x64 }
           - { os: windows-latest, name: win32-x64 }
           - { os: macos-latest, name: darwin-arm64 }
     env:
@@ -60,7 +86,7 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs: [build-linux, build-native]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +118,9 @@ jobs:
             - `https://github.com/${{ github.repository }}/releases/latest/download/agent-mesh-agent-linux-x64.tar.gz`
             - `https://github.com/${{ github.repository }}/releases/latest/download/agent-mesh-agent-win32-x64.tar.gz`
             - `https://github.com/${{ github.repository }}/releases/latest/download/agent-mesh-agent-darwin-arm64.tar.gz`
+
+            Linux packages are built on manylinux2014 (glibc 2.17) so they run on
+            old distros (CentOS 7 / RHEL 7+).
           files: dist/agent-mesh-agent-*.tar.gz
           fail_on_unmatched_files: true
           overwrite_files: true

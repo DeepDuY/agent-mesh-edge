@@ -42,9 +42,15 @@ The resulting tarball is uploaded to the orchestrator (admin console
 
 ## Releases (CI)
 
-`.github/workflows/build-probe.yml` builds `linux-x64` (ubuntu), `win32-x64`
-(windows) and `darwin-arm64` (macOS) on every push to `main` and attaches the
-packages to a Release tagged `probe-v<VERSION>`. Download the latest directly:
+`.github/workflows/build-probe.yml` builds `linux-x64`, `win32-x64` (windows)
+and `darwin-arm64` (macOS) on every push to `main` and attaches the packages to
+a Release tagged `probe-v<VERSION>`. The Linux package is built inside
+`manylinux2014` (CentOS 7, glibc 2.17) on purpose: PyInstaller freezes the build
+host's `libpython`, so building on a newer distro would make every probe require
+a newer glibc (e.g. `libpython3.12.so.1.0: GLIBC_2.38 not found` on old nodes).
+The build script enforces the ceiling (`AGENT_MESH_MAX_GLIBC`, default `2.17`)
+and records `glibc_min` in `MANIFEST.json`; `install.sh` refuses to install on a
+host with an older glibc. Download the latest directly:
 
 ```
 https://github.com/DeepDuY/agent-mesh-edge/releases/latest/download/agent-mesh-agent-linux-x64.tar.gz

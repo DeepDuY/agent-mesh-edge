@@ -29,9 +29,11 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import urllib.request
@@ -58,6 +60,13 @@ _OPENCODE_DOWNLOAD_BASE = os.environ.get(
     "https://github.com/sst/opencode/releases/latest/download",
 )
 
+# Highest GLIBC symbol version a Linux build may require. PyInstaller freezes
+# the build host's libpython, so its glibc floor becomes the target machines'
+# floor; building on a new distro (e.g. ubuntu-24.04 -> GLIBC_2.38) silently
+# breaks older nodes. Keep linux builds on a glibc 2.17 (CentOS 7 /
+# manylinux2014) base unless this ceiling is explicitly raised.
+MAX_GLIBC = os.environ.get("AGENT_MESH_MAX_GLIBC", "2.17")
+
 
 def _run(cmd: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     print("$", " ".join(cmd))
@@ -73,6 +82,67 @@ def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_GLIBC_RE = re.compile(r"GLIBC_(\d+)\.(\d+)")
+
+
+def _parse_glibc(spec: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\s*(\d+)\.(\d+)\s*", spec or "")
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _max_glibc_version(path: Path | None) -> tuple[int, int] | None:
+    """Highest GLIBC_x.y symbol version referenced by an ELF file, if any.
+
+    Uses whichever of ``objdump``/``readelf`` is available; returns ``None``
+    when the tool is missing (or the file is not an ELF) rather than failing
+    the build on a best-effort diagnostic.
+    """
+    if path is None or not path.exists():
+        return None
+    objdump = shutil.which("objdump")
+    if objdump:
+        cmd = [objdump, "-T", str(path)]
+    else:
+        readelf = shutil.which("readelf")
+        if not readelf:
+            return None
+        cmd = [readelf, "--version-info", str(path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    versions = [(int(a), int(b)) for a, b in _GLIBC_RE.findall(proc.stdout)]
+    return max(versions) if versions else None
+
+
+def _shared_libpython() -> Path | None:
+    """Locate the shared ``libpython`` that PyInstaller will bundle."""
+    libdir = sysconfig.get_config_var("LIBDIR")
+    if not libdir:
+        return None
+    base = Path(libdir)
+    for name in (
+        sysconfig.get_config_var("LDLIBRARY"),
+        sysconfig.get_config_var("INSTSONAME"),
+    ):
+        if name and ".so" in str(name):
+            candidate = base / str(name)
+            if candidate.exists():
+                return candidate
+    for candidate in sorted(base.glob("libpython*.so*")):
+        return candidate
+    return None
+
+
+def _linux_glibc_floor(exe: Path) -> tuple[int, int] | None:
+    """Worst-case GLIBC requirement of the frozen binary + bundled libpython."""
+    libpy = _shared_libpython()
+    if libpy is None:
+        print("WARNING: no shared libpython found; glibc floor check may be inaccurate")
+    found = [v for v in (_max_glibc_version(exe), _max_glibc_version(libpy)) if v]
+    return max(found) if found else None
 
 
 def _find_opencode(explicit: str | None = None, os_name: str = "linux") -> Path | None:
@@ -244,6 +314,23 @@ def build(
     exe = _build_binary(os_name)
     edge_name, oc_name = _bin_names(os_name)
 
+    # PyInstaller freezes the build host's libpython, so its glibc symbols
+    # become the floor for every target. Refuse to publish a Linux package that
+    # requires a newer glibc than the configured ceiling.
+    glibc_min: tuple[int, int] | None = None
+    if os_name == "linux":
+        glibc_min = _linux_glibc_floor(exe)
+        max_allowed = _parse_glibc(MAX_GLIBC)
+        if glibc_min and max_allowed and glibc_min > max_allowed:
+            raise SystemExit(
+                f"ERROR: this Linux build requires GLIBC_{glibc_min[0]}.{glibc_min[1]} "
+                f"but the ceiling is GLIBC_{max_allowed[0]}.{max_allowed[1]}.\n"
+                "  Build on an older-glibc host (e.g. CentOS 7 / manylinux2014), or set\n"
+                "  AGENT_MESH_MAX_GLIBC to acknowledge raising the compatibility floor."
+            )
+        if glibc_min:
+            print(f"==> linux glibc floor: {glibc_min[0]}.{glibc_min[1]} (ceiling {MAX_GLIBC})")
+
     with tempfile.TemporaryDirectory(prefix="agent-bootstrap-") as td:
         work = Path(td)
         pkg = work / f"agent-mesh-agent-{os_name}-{arch}"
@@ -303,6 +390,8 @@ def build(
                     "sha256": _sha256(fp),
                 }
         manifest = {"version": VERSION, "files": manifest_files}
+        if glibc_min:
+            manifest["glibc_min"] = f"{glibc_min[0]}.{glibc_min[1]}"
         (pkg / "MANIFEST.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
