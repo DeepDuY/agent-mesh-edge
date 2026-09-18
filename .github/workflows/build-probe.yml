@@ -1,0 +1,98 @@
+name: build-probe
+
+# Builds the self-contained edge probe packages on native runners and attaches
+# them to a GitHub Release (tagged from VERSION). Prebuilt packages are what the
+# orchestrator serves / installs consume — no compilation happens at install
+# time. Re-running on the same VERSION overwrites that release's assets, so bump
+# VERSION when nodes should auto-upgrade.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "bootstrap/**"
+      - "VERSION"
+      - ".github/workflows/build-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x64 }
+          - { os: windows-latest, name: win32-x64 }
+          - { os: macos-latest, name: darwin-arm64 }
+    env:
+      PYTHONPATH: src
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip pyinstaller httpx pydantic pydantic-settings psutil
+
+      - name: Build probe package
+        run: python scripts/build-agent-bootstrap.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.name }}
+          path: dist/agent-mesh-agent-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: dist
+
+      - name: Show packages
+        run: ls -la dist
+
+      - name: Read VERSION
+        id: ver
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: probe-v${{ steps.ver.outputs.version }}
+          name: probe v${{ steps.ver.outputs.version }}
+          body: |
+            Auto-built agent-mesh edge probe packages.
+
+            Assets are (re)generated on every push to `main` from `VERSION`;
+            the tag is `probe-v<VERSION>`. Install/download a package directly:
+
+            - `https://github.com/${{ github.repository }}/releases/latest/download/agent-mesh-agent-linux-x64.tar.gz`
+            - `https://github.com/${{ github.repository }}/releases/latest/download/agent-mesh-agent-win32-x64.tar.gz`
+            - `https://github.com/${{ github.repository }}/releases/latest/download/agent-mesh-agent-darwin-arm64.tar.gz`
+          files: dist/agent-mesh-agent-*.tar.gz
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: true
