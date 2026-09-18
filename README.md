@@ -40,6 +40,23 @@ cannot cross-compile**: the Windows package must be built on Windows.
 The resulting tarball is uploaded to the orchestrator (admin console
 `POST /api/bootstrap`) or copied to `/opt/agent-mesh/data/bootstrap/`.
 
+## Releases (CI)
+
+`.github/workflows/build-probe.yml` builds `linux-x64` (ubuntu), `win32-x64`
+(windows) and `darwin-arm64` (macOS) on every push to `main` and attaches the
+packages to a Release tagged `probe-v<VERSION>`. Download the latest directly:
+
+```
+https://github.com/DeepDuY/agent-mesh-edge/releases/latest/download/agent-mesh-agent-linux-x64.tar.gz
+https://github.com/DeepDuY/agent-mesh-edge/releases/latest/download/agent-mesh-agent-win32-x64.tar.gz
+https://github.com/DeepDuY/agent-mesh-edge/releases/latest/download/agent-mesh-agent-darwin-arm64.tar.gz
+```
+
+Bump `VERSION` to publish a new tag (and to let nodes auto-upgrade). The
+orchestrator can pull these into its cache (`data/bootstrap/`) with
+`POST /api/bootstrap/sync` or `scripts/sync_probe_release.py`, or install
+scripts can download them directly via the `bootstrap_download_base` setting.
+
 ## Install
 
 Linux / macOS (systemd / LaunchDaemon):
