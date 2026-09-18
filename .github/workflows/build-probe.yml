@@ -29,21 +29,24 @@ jobs:
   # PyInstaller freezes the build host's libpython, so building on the default
   # ubuntu-latest image (glibc 2.39) makes the probe require GLIBC_2.38 and
   # aborts on older nodes with "Failed to load ... libpython3.12.so.1.0".
+  #
+  # The container is invoked with `docker run` from the host instead of the
+  # job-level `container:` key: GitHub's JS actions require a Node runtime that
+  # is newer than CentOS 7's glibc, so checkout/upload-artifact cannot run
+  # *inside* the manylinux image.
   build-linux:
     name: build linux-x64
     runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux2014_x86_64
-    env:
-      PYTHONPATH: src
-      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: /opt/python/cp312-cp312/bin/python -m pip install --upgrade pip pyinstaller httpx pydantic pydantic-settings psutil
-
-      - name: Build probe package
-        run: /opt/python/cp312-cp312/bin/python scripts/build-agent-bootstrap.py
+      - name: Build probe package (manylinux2014 / glibc 2.17)
+        run: |
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e PYTHONPATH=src -e PYTHONUTF8=1 \
+            quay.io/pypa/manylinux2014_x86_64 \
+            /bin/bash -c '/opt/python/cp312-cp312/bin/python -m pip install --upgrade pip pyinstaller httpx pydantic pydantic-settings psutil && /opt/python/cp312-cp312/bin/python scripts/build-agent-bootstrap.py'
 
       - uses: actions/upload-artifact@v4
         with:
