@@ -33,7 +33,6 @@ import re
 import shutil
 import subprocess
 import sys
-import sysconfig
 import tarfile
 import tempfile
 import urllib.request
@@ -117,32 +116,49 @@ def _max_glibc_version(path: Path | None) -> tuple[int, int] | None:
     return max(versions) if versions else None
 
 
-def _shared_libpython() -> Path | None:
-    """Locate the shared ``libpython`` that PyInstaller will bundle."""
-    libdir = sysconfig.get_config_var("LIBDIR")
-    if not libdir:
-        return None
-    base = Path(libdir)
-    for name in (
-        sysconfig.get_config_var("LDLIBRARY"),
-        sysconfig.get_config_var("INSTSONAME"),
-    ):
-        if name and ".so" in str(name):
-            candidate = base / str(name)
-            if candidate.exists():
-                return candidate
-    for candidate in sorted(base.glob("libpython*.so*")):
-        return candidate
-    return None
+def _archive_glibc_floor(exe: Path) -> tuple[tuple[int, int] | None, list[tuple[str, tuple[int, int] | None]]]:
+    """Scan every shared library PyInstaller bundled into ``exe``.
+
+    Checking only libpython is not enough: PyInstaller also collects system
+    libraries (notably ``libgcc_s.so.1``), and a modern build host's copies
+    drag in a much newer glibc floor. Returns the worst version plus per-file
+    details for diagnostics.
+    """
+    from PyInstaller.archive.readers import CArchiveReader
+
+    reader = CArchiveReader(str(exe))
+    worst: tuple[int, int] | None = None
+    details: list[tuple[str, tuple[int, int] | None]] = []
+    with tempfile.TemporaryDirectory(prefix="glibc-scan-") as td:
+        tmpdir = Path(td)
+        for name, entry in reader.toc.items():
+            if entry[-1] != "b":
+                continue
+            if not (name.endswith(".so") or ".so." in name):
+                continue
+            try:
+                data = reader.extract(name)
+            except Exception:  # pragma: no cover - malformed archive
+                continue
+            tmp = tmpdir / Path(name).name
+            tmp.write_bytes(data)
+            version = _max_glibc_version(tmp)
+            details.append((name, version))
+            if version and (worst is None or version > worst):
+                worst = version
+    return worst, details
 
 
 def _linux_glibc_floor(exe: Path) -> tuple[int, int] | None:
-    """Worst-case GLIBC requirement of the frozen binary + bundled libpython."""
-    libpy = _shared_libpython()
-    if libpy is None:
-        print("WARNING: no shared libpython found; glibc floor check may be inaccurate")
-    found = [v for v in (_max_glibc_version(exe), _max_glibc_version(libpy)) if v]
-    return max(found) if found else None
+    """Worst-case GLIBC requirement across the frozen binary's bundled libs."""
+    worst, details = _archive_glibc_floor(exe)
+    if not details:
+        print("WARNING: no bundled shared libraries found; glibc floor check skipped")
+        return None
+    for name, version in details:
+        if version:
+            print(f"    {name}: GLIBC_{version[0]}.{version[1]}")
+    return worst
 
 
 def _find_opencode(explicit: str | None = None, os_name: str = "linux") -> Path | None:

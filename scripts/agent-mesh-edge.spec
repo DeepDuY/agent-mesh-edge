@@ -39,6 +39,13 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# Never bundle the build host's libgcc_s: on modern hosts (Ubuntu 24.04) it is
+# linked against a newer glibc (GLIBC_2.35) than the probe targets, so the
+# frozen app dies on old distros with "libgcc_s.so.1: GLIBC_2.35 not found".
+# Target machines provide their own libgcc_s (part of gcc-libs on every glibc
+# distro). No-op on Windows/macOS, whose gcc runtime is named differently.
+a.binaries = [b for b in a.binaries if not b[0].startswith("libgcc_s")]
+
 exe = EXE(
     pyz,
     a.scripts,
