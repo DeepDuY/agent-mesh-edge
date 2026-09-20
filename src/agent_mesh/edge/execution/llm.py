@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_mesh.edge.config_writer import build_opencode_config, find_runtime
-from agent_mesh.edge.execution.common import ExecutionOutcome, _error_outcome, stream_task_log
+from agent_mesh.edge.execution.common import (
+    ExecutionOutcome,
+    _error_outcome,
+    stop_task_log,
+    stream_task_log,
+)
 from agent_mesh.edge.execution.parsing import (
     _classify_llm_error,
     _classify_opencode_line,
@@ -160,11 +165,7 @@ async def run_llm(
         )
     finally:
         if log_task is not None:
-            log_task.cancel()
-            try:
-                await log_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            await stop_task_log(log_queue, log_task)
     _cleanup_config(config_path)
     if was_cancelled:
         logger.warning("llm task=%s cancelled by orchestrator", task.task_id)

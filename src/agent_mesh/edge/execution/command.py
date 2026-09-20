@@ -5,7 +5,12 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_mesh.edge.execution.common import ExecutionOutcome, _error_outcome, stream_task_log
+from agent_mesh.edge.execution.common import (
+    ExecutionOutcome,
+    _error_outcome,
+    stop_task_log,
+    stream_task_log,
+)
 from agent_mesh.edge.execution.process import (
     _first_line,
     _read_stream,
@@ -79,7 +84,7 @@ async def run_command(
         )
 
         def _on_line(_line: str) -> None:
-            # Command-mode output is surfaced verbatim as raw live log lines.
+            # Both stdout and stderr are surfaced verbatim as raw live log lines.
             log_queue.put_nowait({"kind": "raw", "content": _line.rstrip("\n")})
 
     else:
@@ -87,7 +92,7 @@ async def run_command(
 
     read_task = asyncio.gather(
         _read_stream(proc.stdout, stdout_chunks, limit, on_line=_on_line),
-        _read_stream(proc.stderr, stderr_chunks, limit),
+        _read_stream(proc.stderr, stderr_chunks, limit, on_line=_on_line),
     )
     try:
         exit_code, was_cancelled = await _wait_proc(
@@ -95,11 +100,7 @@ async def run_command(
         )
     finally:
         if log_task is not None:
-            log_task.cancel()
-            try:
-                await log_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            await stop_task_log(log_queue, log_task)
     if was_cancelled:
         logger.warning("command task=%s cancelled by orchestrator", task.task_id)
         return ExecutionOutcome(
