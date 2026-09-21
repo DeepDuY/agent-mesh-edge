@@ -44,6 +44,7 @@ class Executor:
         llm_models: list[str] | None = None,
         permission: dict | None = None,
         shell: str = "",
+        skill_cache_dir: str = "",
     ):
         self.runtime = runtime
         self.llm_api_key = llm_api_key
@@ -56,6 +57,7 @@ class Executor:
         self.llm_models = list(llm_models or [])
         self.permission = permission
         self.shell = shell or ""
+        self.skill_cache_dir = skill_cache_dir or ""
 
     async def run_task(
         self, task: Task, cancel_event: asyncio.Event | None = None,
@@ -75,6 +77,7 @@ class Executor:
             system_prompt=self.system_prompt,
             llm_models=self.llm_models,
             permission=self.permission,
+            skill_cache_dir=self.skill_cache_dir,
         )
 
     def build_task_result(self, outcome: ExecutionOutcome) -> TaskResult:

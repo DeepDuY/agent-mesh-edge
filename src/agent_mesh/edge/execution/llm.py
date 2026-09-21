@@ -29,6 +29,7 @@ from agent_mesh.edge.execution.process import (
     spawn_kwargs,
 )
 from agent_mesh.edge.execution.prompt import _wrap_llm_instruction
+from agent_mesh.edge.execution.skills import SkillUnavailable, load_skills_block
 from agent_mesh.edge.execution.workspace import (
     _cleanup_config,
     _collect_artifacts,
@@ -53,6 +54,7 @@ async def run_llm(
     system_prompt: str = "",
     llm_models: list[str] | None = None,
     permission: dict | None = None,
+    skill_cache_dir: str = "",
 ) -> ExecutionOutcome:
     runtime_path = find_runtime(runtime)
     pre_snapshot = _snapshot_files(workdir)
@@ -73,9 +75,24 @@ async def run_llm(
         models=llm_models,
     )
 
+    # Task-requested skills are fetched and injected; a missing/disabled skill
+    # fails the task with a clear reason (no silent skip).
+    skills_block = ""
+    if task.constraints.skills:
+        try:
+            skills_block = await load_skills_block(
+                task.constraints.skills,
+                workdir,
+                edge_token,
+                orchestrator_base_url,
+                skill_cache_dir,
+            )
+        except SkillUnavailable as e:
+            return _error_outcome("llm", str(e))
+
     instruction = task.instruction
     if runtime == "opencode":
-        wrapped_instruction = _wrap_llm_instruction(instruction, system_prompt)
+        wrapped_instruction = _wrap_llm_instruction(instruction, system_prompt, skills_block)
         cmd = [
             runtime_path,
             "run",
@@ -90,11 +107,10 @@ async def run_llm(
         if task.constraints.session_id:
             cmd += ["--session", task.constraints.session_id]
     elif runtime == "claude":
-        wrapped_instruction = (
-            f"{system_prompt.strip()}\n\n{instruction}"
-            if system_prompt.strip()
-            else instruction
+        prefix = "\n\n".join(
+            p for p in (system_prompt.strip(), skills_block.strip()) if p
         )
+        wrapped_instruction = f"{prefix}\n\n{instruction}" if prefix else instruction
         cmd = [
             runtime_path,
             "-p",

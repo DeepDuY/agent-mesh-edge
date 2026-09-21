@@ -80,6 +80,7 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
             llm_models=parse_model_list(llm_models),
             permission=permission,
             shell=shell,
+            skill_cache_dir=os.path.join(self.install_dir, "cache", "skills"),
         )
         self._stop_event = asyncio.Event()
         self._last_cpu_sample = None
