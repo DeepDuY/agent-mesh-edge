@@ -7,7 +7,12 @@
     Companion to bootstrap/install.sh for Windows. Copies the bundled binaries,
     writes etc\edge.env, and registers a Scheduled Task ("agent-mesh-edge") that
     runs the keepalive launcher at boot as SYSTEM. No NSSM/WinSW dependency: the
-    launcher itself restarts the agent if it exits.
+    launcher itself restarts the agent if it exits and applies self-upgrades.
+
+    The bundled agent binary is installed as bin\agent-mesh-edge.bin.exe and run
+    by the launcher (bin\agent-mesh-edge.cmd). The indirection exists because a
+    Windows process cannot replace its own running .exe: the agent only stages
+    the new image and the launcher swaps it in on the next start.
 
 .PARAMETER OrchestratorUrl
     Base URL of the orchestrator, e.g. http://10.0.0.1:8000.
@@ -48,18 +53,27 @@ if (-not $AgentId) { $AgentId = $env:COMPUTERNAME }
 if (-not $WorkDir) { $WorkDir = Join-Path $InstallDir 'work' }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$InstallLog = Join-Path $InstallDir 'logs\install.log'
 
 # Run a native command without letting its stderr become a terminating error
 # under $ErrorActionPreference='Stop' (e.g. `schtasks /End` on a task that does
 # not exist yet on a first install). Returns the exit code.
 function Invoke-Quiet {
-    param([string]$Exe, [string[]]$Args)
+    param([string]$Exe, [string[]]$Arguments)
     $eap = $ErrorActionPreference
     $ErrorActionPreference = 'SilentlyContinue'
-    try { & $Exe @Args 2>$null | Out-Null } catch { }
+    try { & $Exe @Arguments 2>$null | Out-Null } catch { }
     $code = $LASTEXITCODE
     $ErrorActionPreference = $eap
     return $code
+}
+
+function Write-Log {
+    param([string]$Message)
+    Write-Host $Message
+    try {
+        Add-Content -Path $InstallLog -Value ("[" + (Get-Date -Format s) + "] " + $Message) -ErrorAction SilentlyContinue
+    } catch { }
 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -68,9 +82,24 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIde
 
 # ========== Pre-flight checks ==========
 Write-Host '==> Running pre-flight checks...'
-if (-not $isAdmin) {
-    Write-Warning 'not running as Administrator; Scheduled Task registration will be skipped'
+
+# The agent is a machine-wide SYSTEM service: registering its boot Scheduled
+# Task needs Administrator. Fail loudly instead of silently skipping autostart
+# (which used to leave a running-but-not-booting node behind).
+if ((-not $isAdmin) -and (-not $SkipService)) {
+    Write-Error @'
+ERROR: Administrator privileges are required to register the boot Scheduled Task.
+       Re-run this installer from an elevated PowerShell ("Run as Administrator").
+       Pass -SkipService only if you intentionally want to lay down files without
+       autostart (start bin\agent-mesh-edge.cmd manually).
+'@
+    exit 1
 }
+if (-not $isAdmin) {
+    Write-Warning 'not running as Administrator; -SkipService given, Scheduled Task will be skipped'
+}
+
+New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir 'logs') | Out-Null
 
 $driveLetter = (Split-Path -Qualifier $InstallDir).TrimEnd(':')
 try {
@@ -83,8 +112,9 @@ try {
     Write-Warning "could not determine free disk space for $InstallDir"
 }
 
-$existing = (Test-Path (Join-Path $InstallDir 'bin\agent-mesh-edge.exe')) -or
-            (Test-Path (Join-Path $InstallDir 'bin\agent-mesh-edge.bin'))
+$binFile = Join-Path $InstallDir 'bin\agent-mesh-edge.bin.exe'
+$legacyBin = Join-Path $InstallDir 'bin\agent-mesh-edge.exe'
+$existing = (Test-Path $binFile) -or (Test-Path $legacyBin)
 if ($existing) {
     Write-Warning "agent-mesh-edge already exists at $InstallDir"
     if (-not $Force) {
@@ -93,25 +123,35 @@ if ($existing) {
     }
     Write-Host '-Force: stopping existing Scheduled Task / agent'
     Invoke-Quiet schtasks.exe @('/End', '/TN', $TaskName) | Out-Null
-    Get-Process agent-mesh-edge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process agent-mesh-edge, agent-mesh-edge.bin -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 Write-Host '==> Pre-flight checks passed'
 
 # ========== Install ==========
-Write-Host "==> Installing agent-mesh agent to $InstallDir"
+Write-Log "==> Installing agent-mesh agent to $InstallDir"
 foreach ($d in @('bin', 'etc', 'logs', 'run')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir $d) | Out-Null
 }
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 
-# Fresh install: drop stale sync/upgrade state so the new binary re-syncs LLM config.
+# Fresh install: drop stale sync/upgrade state so the new binary re-syncs LLM
+# config and does not skip config_version comparison after reinstall.
 foreach ($f in @('config_version', 'upgrading', 'upgrade-started', 'agent_version.bak')) {
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $InstallDir "etc\$f")
 }
-Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $InstallDir 'bin\agent-mesh-edge.bin.old')
+foreach ($f in @(
+        'agent-mesh-edge.bin.exe.old', 'agent-mesh-edge.bin.exe.new',
+        'agent-mesh-edge.exe', 'opencode.exe.old', 'opencode.exe.new'
+    )) {
+    Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $InstallDir "bin\$f")
+}
 
 Copy-Item -Force -Path (Join-Path $ScriptDir 'bin\*') -Destination (Join-Path $InstallDir 'bin')
+# The launcher runs the .bin.exe indirection so a self-upgrade can swap the
+# image while it is not running (mirrors bin/agent-mesh-edge + .bin on POSIX).
+Move-Item -Force (Join-Path $InstallDir 'bin\agent-mesh-edge.exe') $binFile
 Copy-Item -Force -Path (Join-Path $ScriptDir 'agent-mesh-edge.cmd') -Destination (Join-Path $InstallDir 'bin\agent-mesh-edge.cmd')
 
 # Runtime config (UTF-8 without BOM so the .cmd `for /f` parser and pydantic read it cleanly).
@@ -151,19 +191,27 @@ if (Test-Path (Join-Path $InstallDir 'bin\opencode.exe')) {
 $launcher = Join-Path $InstallDir 'bin\agent-mesh-edge.cmd'
 $registered = $false
 
-if ($SkipService -or (-not $isAdmin)) {
+if ($SkipService) {
     Write-Host '==> Skipped Scheduled Task registration'
 } else {
     $cmdExe = Join-Path $env:SystemRoot 'System32\cmd.exe'
     try {
         if (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) {
             $action = New-ScheduledTaskAction -Execute $cmdExe -Argument "/c `"$launcher`""
-            $trigger = New-ScheduledTaskTrigger -AtStartup
+            $bootTrigger = New-ScheduledTaskTrigger -AtStartup
+            # Safety net: in addition to boot, retry every 5 minutes. A missed
+            # boot trigger (or a failed install-time start) therefore self-heals
+            # without a reboot; IgnoreNew prevents a second instance while the
+            # keepalive loop is already running.
+            $repetitionTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
+                -RepetitionInterval (New-TimeSpan -Minutes 5) `
+                -RepetitionDuration (New-TimeSpan -Days 3650)
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -DontStopOnIdleEnd -StartWhenAvailable -MultipleInstances IgnoreNew `
                 -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
             $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
-                -Principal $principal -Force | Out-Null
+            Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($bootTrigger, $repetitionTrigger) `
+                -Settings $settings -Principal $principal -Force | Out-Null
             $registered = $true
         }
     } catch {
@@ -176,17 +224,40 @@ if ($SkipService -or (-not $isAdmin)) {
         )) -eq 0
     }
     if ($registered) {
-        Write-Host "==> Scheduled Task registered: $TaskName (boot, SYSTEM)"
-        Invoke-Quiet schtasks.exe @('/Run', '/TN', $TaskName) | Out-Null
-        Write-Host "==> Started. Check: schtasks /Query /TN $TaskName /V /FO LIST"
+        Write-Log "==> Scheduled Task registered: $TaskName (boot + every 5min, SYSTEM)"
+        # Start it now and verify: a task that registered but never ran (Last
+        # Result 267011 / 0x41303 "has not yet run") is exactly the silent
+        # autostart failure we want to catch.
+        $started = $false
+        try {
+            Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            $started = $true
+        } catch {
+            Write-Warning "Start-ScheduledTask failed ($($_.Exception.Message)); falling back to schtasks /Run"
+        }
+        if (-not $started) {
+            $started = (Invoke-Quiet schtasks.exe @('/Run', '/TN', $TaskName)) -eq 0
+        }
+        Start-Sleep -Seconds 2
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+        $state = (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue).State
+        if ($info) {
+            Write-Log "    task state=$state lastRun=$($info.LastRunTime) result=$($info.LastTaskResult)"
+        }
+        if ($started) {
+            Write-Log "==> Started. Check: schtasks /Query /TN $TaskName /V /FO LIST"
+        } else {
+            Write-Warning "could not start the Scheduled Task automatically; it will start at boot / within 5 minutes. Start now: $launcher"
+        }
     } else {
-        Write-Warning "failed to register the Scheduled Task; start manually: $launcher"
+        Write-Error "failed to register the Scheduled Task; start manually: $launcher"
     }
 }
 
 Write-Host "==> Agent installed to $InstallDir"
 Write-Host "    version : $(Get-Content (Join-Path $InstallDir 'etc\agent_version') -ErrorAction SilentlyContinue)"
 Write-Host "    log     : $(Join-Path $InstallDir 'logs\edge.log')"
+Write-Host "    install : $InstallLog"
 if (-not $registered) {
     Write-Host "    start   : $launcher"
 }

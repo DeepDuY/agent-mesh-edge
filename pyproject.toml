@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-mesh-edge"
-version = "1.6.5"
+version = "1.6.7"
 description = "agent-mesh edge probe: self-contained build of the edge agent"
 readme = "README.md"
 requires-python = ">=3.12"

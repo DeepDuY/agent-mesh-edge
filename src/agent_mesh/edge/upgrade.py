@@ -102,6 +102,8 @@ def cleanup_upgrade_tmp(install_dir: str) -> None:
     for f in (
         install / "bin" / "agent-mesh-edge.bin.new",
         install / "bin" / "opencode.new",
+        install / "bin" / "agent-mesh-edge.bin.exe.new",
+        install / "bin" / "opencode.exe.new",
     ):
         try:
             f.unlink(missing_ok=True)
@@ -132,10 +134,16 @@ class UpgradeMixin:
         if (time.monotonic() - self._last_upgrade_attempt) < interval:
             return
         self._last_upgrade_attempt = time.monotonic()
+        replaced = False
         try:
-            await self._perform_upgrade(upgrade)
+            replaced = await self._perform_upgrade(upgrade)
         except Exception as e:
             logger.exception("upgrade failed: %s", e)
+        if replaced:
+            # The process is being replaced (service restart / execv / Windows
+            # launcher swap) or the staged upgrade will be applied on restart.
+            self._upgrade_failures = 0
+            return
         # If we reach here the process was not replaced, so the attempt counts
         # as a failure.
         self._upgrade_failures += 1
@@ -159,11 +167,91 @@ class UpgradeMixin:
             marker.unlink()
             (install / "etc" / "upgrade-started").unlink(missing_ok=True)
             (install / "bin" / "agent-mesh-edge.bin.old").unlink(missing_ok=True)
+            (install / "bin" / "agent-mesh-edge.bin.exe.old").unlink(missing_ok=True)
             (install / "etc" / "agent_version.bak").unlink(missing_ok=True)
             cleanup_upgrade_tmp(self.install_dir)
             logger.info("upgrade confirmed healthy; removed rollback backup")
         except OSError as e:
             logger.warning("could not clear upgrade marker: %s", e)
+
+    async def _perform_upgrade_windows(self, upgrade: dict) -> bool:
+        """Stage a Windows upgrade; the launcher performs the swap on restart.
+
+        A Windows process cannot rename/replace its own running ``.exe``, so
+        unlike POSIX the agent does not touch the installed binary. It downloads
+        the package, streams out only the changed members as ``*.new``, records
+        the version + rollback markers, then stops: the keepalive launcher
+        (``bin\\agent-mesh-edge.cmd``) swaps the staged files in before it starts
+        the new binary, exactly like the POSIX wrapper does.
+        """
+        version = upgrade.get("version")
+        if not version:
+            logger.warning("upgrade skipped: no version in directive")
+            return False
+        install = Path(self.install_dir)
+        bin_dir = install / "bin"
+        launcher = bin_dir / "agent-mesh-edge.cmd"
+        bin_file = bin_dir / "agent-mesh-edge.bin.exe"
+        if not launcher.exists() or not bin_file.exists():
+            logger.warning(
+                "upgrade skipped: %s is not an installed Windows layout "
+                "(reinstall the probe once to enable self-upgrade)", install
+            )
+            return False
+
+        arch = get_arch()
+        filename = upgrade.get("filename") or f"agent-mesh-agent-win32-{arch}.tar.gz"
+
+        staging = install / ".upgrade"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        pkg_path = staging / filename
+        try:
+            url = f"{self.client.base_url}/api/bootstrap/{filename}"
+            logger.info("downloading upgrade package %s -> %s", url, pkg_path)
+            await self.client.download_to(url, str(pkg_path))
+
+            with tarfile.open(pkg_path, "r:gz") as tar:
+                root = _tar_root(tar)
+                manifest = _read_manifest(tar, root)
+                new_version = str(manifest.get("version") or version)
+                files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+
+                new_bin = bin_dir / "agent-mesh-edge.bin.exe.new"
+                _extract_tar_member(tar, f"{root}/bin/agent-mesh-edge.exe", new_bin)
+
+                # opencode: only stage when missing/changed (large member).
+                if _member_present(tar, f"{root}/bin/opencode.exe"):
+                    installed_oc = bin_dir / "opencode.exe"
+                    info = files.get("bin/opencode.exe")
+                    if _needs_replace(installed_oc, info):
+                        _extract_tar_member(
+                            tar, f"{root}/bin/opencode.exe", bin_dir / "opencode.exe.new"
+                        )
+                        logger.info("opencode update staged")
+                    else:
+                        logger.info("opencode unchanged; skipped extraction")
+
+            etc = install / "etc"
+            etc.mkdir(parents=True, exist_ok=True)
+            version_path = etc / "agent_version"
+            if version_path.exists():
+                shutil.copy2(version_path, etc / "agent_version.bak")
+            version_path.write_text(new_version, encoding="utf-8")
+            (etc / "upgrade-started").unlink(missing_ok=True)
+            (etc / "upgrading").touch()
+            logger.info("upgrade staged (v%s); stopping so the launcher can swap", new_version)
+        except Exception:
+            logger.exception("upgrade failed")
+            return False
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+        # Stop the run loop: the keepalive launcher applies the staged files and
+        # starts the new binary (equivalent to the POSIX service-manager restart).
+        self._request_stop()
+        await asyncio.sleep(2)
+        return True
 
     async def _perform_upgrade(self, upgrade: dict) -> bool:
         """Download the package, atomically replace the binary and restart.
@@ -181,6 +269,9 @@ class UpgradeMixin:
         if not version:
             logger.warning("upgrade skipped: no version in directive")
             return False
+        if get_os() == "win32":
+            return await self._perform_upgrade_windows(upgrade)
+
         install = Path(self.install_dir)
         bin_dir = install / "bin"
         wrapper = bin_dir / "agent-mesh-edge"
@@ -189,9 +280,6 @@ class UpgradeMixin:
             logger.warning(
                 "upgrade skipped: %s is not an installed layout", install
             )
-            return False
-        if get_os() == "win32":
-            logger.warning("upgrade not supported on win32 yet")
             return False
 
         os_name = get_os()

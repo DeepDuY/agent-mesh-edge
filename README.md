@@ -80,7 +80,11 @@ $env:TOKEN='<token>'; irm -Headers @{Authorization="Bearer <token>"} <url>/api/b
 
 Windows installs to `C:\ProgramData\agent-mesh-agent` and autostarts via a
 Scheduled Task (`agent-mesh-edge`, SYSTEM) running the `.cmd` keepalive loop.
-Self-upgrade is currently POSIX-only; a Windows node upgrades by reinstalling.
+Self-upgrade works the same way as Linux: the agent stages the new image and the
+launcher swaps it in on the next start, with automatic rollback if the new
+binary never confirms healthy. Nodes installed before 1.6.6 (old
+`bin\agent-mesh-edge.exe` layout) must be reinstalled once to enable
+self-upgrade.
 
 ## Notes
 
