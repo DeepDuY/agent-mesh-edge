@@ -16,6 +16,7 @@ from agent_mesh.edge.config_writer import (
     get_os,
     parse_model_list,
     persist_edge_token,
+    persist_tls,
     read_agent_version,
     read_edge_token,
     read_llm_models,
@@ -50,6 +51,7 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
         permission: dict | None = None,
         artifact_timeout_s: float = 300.0,
         shell: str = "",
+        tls_fingerprint: str = "",
     ):
         self.agent_id = agent_id
         self.runtime = runtime
@@ -66,7 +68,8 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
         llm_models = llm_models or read_llm_models(self.install_dir) or ""
         permission = permission or read_permission(self.install_dir)
         self.client = EdgeRestClient(
-            orchestrator_url.replace("/mcp", ""), token, artifact_timeout_s
+            orchestrator_url.replace("/mcp", ""), token, artifact_timeout_s,
+            tls_fingerprint=tls_fingerprint,
         )
         self.executor = Executor(
             runtime=runtime,
@@ -81,6 +84,7 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
             permission=permission,
             shell=shell,
             skill_cache_dir=os.path.join(self.install_dir, "cache", "skills"),
+            tls_fingerprint=tls_fingerprint,
         )
         self._stop_event = asyncio.Event()
         self._last_cpu_sample = None
@@ -179,6 +183,11 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
                     except Exception as e:
                         logger.warning("apply llm config failed: %s", e)
 
+                # TLS upgrade: the orchestrator announced a certificate fingerprint
+                # and we are still on plaintext. Pin it and switch the same host
+                # and port to HTTPS; the change is persisted so restarts keep it.
+                await self._maybe_enable_tls(resp.get("tls"))
+
                 # Self-upgrade only when completely idle (no tasks executing and
                 # none handed out this round), honouring the failure backoff.
                 await self._maybe_upgrade(resp.get("upgrade"), bool(task_data_list))
@@ -215,6 +224,28 @@ class EdgeAgent(TaskRunnerMixin, UpgradeMixin):
                 )
             except asyncio.TimeoutError:
                 pass
+
+    # ------------------------------------------------------------------
+    # TLS upgrade
+    # ------------------------------------------------------------------
+    async def _maybe_enable_tls(self, tls: dict | None) -> None:
+        if not isinstance(tls, dict) or not tls.get("enabled"):
+            return
+        fingerprint = str(tls.get("fingerprint") or "").strip().lower()
+        if not fingerprint or self.client.base_url.startswith("https://"):
+            return
+        try:
+            await self.client.enable_tls(fingerprint)
+        except Exception as e:
+            logger.warning("switch to TLS failed: %s", e)
+            return
+        self.executor.orchestrator_base_url = self.client.base_url
+        self.executor.tls_fingerprint = fingerprint
+        try:
+            persist_tls(self.install_dir, self.client.base_url, fingerprint)
+        except Exception as e:
+            logger.warning("failed to persist TLS config: %s", e)
+        logger.info("switched orchestrator connection to TLS (%s)", self.client.base_url)
 
     # ------------------------------------------------------------------
     # LLM config sync
@@ -299,6 +330,7 @@ def main() -> None:
         system_prompt=cfg.system_prompt,
         artifact_timeout_s=cfg.artifact_timeout_s,
         shell=cfg.shell,
+        tls_fingerprint=cfg.tls_fingerprint,
     )
     asyncio.run(agent.run())
 

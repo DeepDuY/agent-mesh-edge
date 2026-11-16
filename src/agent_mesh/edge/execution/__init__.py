@@ -45,6 +45,7 @@ class Executor:
         permission: dict | None = None,
         shell: str = "",
         skill_cache_dir: str = "",
+        tls_fingerprint: str = "",
     ):
         self.runtime = runtime
         self.llm_api_key = llm_api_key
@@ -58,6 +59,7 @@ class Executor:
         self.permission = permission
         self.shell = shell or ""
         self.skill_cache_dir = skill_cache_dir or ""
+        self.tls_fingerprint = tls_fingerprint or ""
 
     async def run_task(
         self, task: Task, cancel_event: asyncio.Event | None = None,
@@ -78,6 +80,7 @@ class Executor:
             llm_models=self.llm_models,
             permission=self.permission,
             skill_cache_dir=self.skill_cache_dir,
+            tls_fingerprint=self.tls_fingerprint,
         )
 
     def build_task_result(self, outcome: ExecutionOutcome) -> TaskResult:

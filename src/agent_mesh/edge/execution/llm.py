@@ -55,6 +55,7 @@ async def run_llm(
     llm_models: list[str] | None = None,
     permission: dict | None = None,
     skill_cache_dir: str = "",
+    tls_fingerprint: str = "",
 ) -> ExecutionOutcome:
     runtime_path = find_runtime(runtime)
     pre_snapshot = _snapshot_files(workdir)
@@ -86,6 +87,7 @@ async def run_llm(
                 edge_token,
                 orchestrator_base_url,
                 skill_cache_dir,
+                tls_fingerprint=tls_fingerprint,
             )
         except SkillUnavailable as e:
             return _error_outcome("llm", str(e))

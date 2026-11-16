@@ -86,6 +86,7 @@ async def load_skills_block(
     orchestrator_base_url: str,
     cache_dir: str | Path | None = None,
     client: httpx.AsyncClient | None = None,
+    tls_fingerprint: str = "",
 ) -> str:
     """Return a prompt block embedding the requested skills' SKILL.md text.
 
@@ -100,10 +101,13 @@ async def load_skills_block(
 
     own_client = client is None
     if own_client:
+        from agent_mesh.edge.rest_client import tls_verify
+
         client = httpx.AsyncClient(
             base_url=base,
             headers={"Authorization": f"Bearer {token}"},
             timeout=httpx.Timeout(60.0),
+            verify=tls_verify(tls_fingerprint) if base.startswith("https://") else True,
         )
     cache = _cache_dir(cache_dir)
     sections: list[tuple[str, str]] = []

@@ -276,31 +276,44 @@ def read_llm_models(install_dir: str) -> str:
         return ""
 
 
+def _upsert_env(install_dir: str, key: str, value: str) -> None:
+    """Set one ``KEY=value`` line in ``etc/edge.env``, creating the file if needed."""
+    etc = Path(install_dir) / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+    env_path = etc / "edge.env"
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    prefix = f"{key}="
+    updated = False
+    out: list[str] = []
+    for line in lines:
+        if line.startswith(prefix):
+            out.append(f"{key}={value}")
+            updated = True
+        else:
+            out.append(line)
+    if not updated:
+        out.append(f"{key}={value}")
+    env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def persist_tls(install_dir: str, orchestrator_url: str, fingerprint: str) -> None:
+    """Record the switch to HTTPS so it survives a restart.
+
+    Writes the rewritten URL, the TLS flag and the pinned certificate
+    fingerprint. The fingerprint is what later connections verify against.
+    """
+    _upsert_env(install_dir, "EDGE_ORCHESTRATOR_URL", orchestrator_url)
+    _upsert_env(install_dir, "EDGE_TLS", "1")
+    _upsert_env(install_dir, "EDGE_TLS_FINGERPRINT", fingerprint)
+
+
 def persist_edge_token(install_dir: str, token: str) -> None:
     """Persist the agent's own token into edge.env (EDGE_TOKEN=...).
 
     Keeps the token stable across restarts once the orchestrator issues the
     agent an independent token on first registration.
     """
-    install = Path(install_dir)
-    etc = install / "etc"
-    etc.mkdir(parents=True, exist_ok=True)
-    env_path = etc / "edge.env"
-    if not env_path.exists():
-        env_path.write_text(f"EDGE_TOKEN={token}\n", encoding="utf-8")
-        return
-    lines = env_path.read_text(encoding="utf-8").splitlines()
-    updated = False
-    out: list[str] = []
-    for line in lines:
-        if line.startswith("EDGE_TOKEN="):
-            out.append(f"EDGE_TOKEN={token}")
-            updated = True
-        else:
-            out.append(line)
-    if not updated:
-        out.append(f"EDGE_TOKEN={token}")
-    env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    _upsert_env(install_dir, "EDGE_TOKEN", token)
 
 
 def read_edge_token(install_dir: str) -> str | None:

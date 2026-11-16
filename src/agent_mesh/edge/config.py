@@ -45,6 +45,13 @@ class EdgeConfig(BaseSettings):
     # HTTP timeout for artifact uploads (seconds). Larger artifacts need more
     # time; overridden at runtime by the orchestrator's config-sync.
     artifact_timeout_s: float = 300.0
+    # Encrypt the connection to the orchestrator. Off by default so an upgraded
+    # probe keeps speaking plaintext until the orchestrator announces TLS and the
+    # probe pins its certificate (see agent.py). Set EDGE_TLS=1 to force it.
+    tls: bool = False
+    # SHA-256 fingerprint (hex, no colons) of the orchestrator's certificate.
+    # Required when tls is on: the probe pins this instead of trusting a CA.
+    tls_fingerprint: str = ""
 
     @field_validator("artifact_timeout_s", mode="before")
     @classmethod

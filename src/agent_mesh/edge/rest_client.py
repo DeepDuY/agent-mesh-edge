@@ -1,11 +1,42 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def tls_verify(fingerprint: str) -> ssl.SSLContext:
+    """SSL context that pins the orchestrator's certificate by SHA-256.
+
+    The orchestrator uses a self-signed certificate, so the probe cannot rely on
+    a public CA. The context disables CA and hostname checks; the exact
+    fingerprint announced over the first plaintext poll is verified after the
+    handshake (see ``_assert_fingerprint``), which also blocks a later downgrade.
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _assert_fingerprint(response: httpx.Response, expected: str) -> None:
+    if not expected:
+        return
+    stream = response.extensions.get("network_stream")
+    sslobj = getattr(stream, "get_extra_info", lambda _k: None)("ssl_object")
+    if sslobj is None:
+        raise ssl.SSLError("TLS connection has no certificate to verify")
+    import hashlib
+
+    digest = hashlib.sha256(sslobj.getpeercert(binary_form=True)).hexdigest()
+    if digest != expected.replace(":", "").strip().lower():
+        raise ssl.SSLError(
+            f"orchestrator certificate fingerprint mismatch: {digest} != {expected}"
+        )
 
 
 class EdgeRestClient:
@@ -15,14 +46,20 @@ class EdgeRestClient:
     """
 
     def __init__(
-        self, base_url: str, token: str, artifact_timeout_s: float = 300.0
+        self,
+        base_url: str,
+        token: str,
+        artifact_timeout_s: float = 300.0,
+        tls_fingerprint: str = "",
     ):
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self.tls_fingerprint = tls_fingerprint
         self._artifact_timeout = httpx.Timeout(artifact_timeout_s)
         self._client = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {token}"},
             timeout=httpx.Timeout(30.0),
+            verify=tls_verify(tls_fingerprint) if base_url.startswith("https://") else True,
         )
 
     def set_artifact_timeout(self, seconds: float) -> None:
@@ -40,9 +77,29 @@ class EdgeRestClient:
         self.token = token
         self._client.headers["Authorization"] = f"Bearer {token}"
 
+    async def enable_tls(self, fingerprint: str) -> None:
+        """Switch this client from plaintext HTTP to HTTPS on the same port.
+
+        Called once the orchestrator announces TLS. The base URL keeps its host
+        and port; only the scheme changes, and the certificate is pinned to the
+        announced fingerprint. Idempotent if already on HTTPS.
+        """
+        if self.base_url.startswith("https://") and self.tls_fingerprint == fingerprint:
+            return
+        self.base_url = "https://" + self.base_url.split("://", 1)[-1]
+        self.tls_fingerprint = fingerprint
+        old = self._client
+        self._client = httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {self.token}"},
+            timeout=httpx.Timeout(30.0),
+            verify=tls_verify(fingerprint),
+        )
+        await old.aclose()
+
     async def _post(self, path: str, json: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.base_url}/api{path}"
         resp = await self._client.post(url, json=json)
+        _assert_fingerprint(resp, self.tls_fingerprint)
         resp.raise_for_status()
         return resp.json()
 
@@ -55,6 +112,7 @@ class EdgeRestClient:
             headers={"Authorization": f"Bearer {self.token}"},
             timeout=self._artifact_timeout,
         )
+        _assert_fingerprint(resp, self.tls_fingerprint)
         resp.raise_for_status()
         return resp.json()
 
@@ -126,6 +184,7 @@ class EdgeRestClient:
             async with self._client.stream(
                 "GET", url, timeout=httpx.Timeout(600.0)
             ) as resp:
+                _assert_fingerprint(resp, self.tls_fingerprint)
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
                     f.write(chunk)
@@ -147,6 +206,7 @@ class EdgeRestClient:
             async with self._client.stream(
                 "GET", url, timeout=httpx.Timeout(120.0)
             ) as resp:
+                _assert_fingerprint(resp, self.tls_fingerprint)
                 resp.raise_for_status()
                 async for chunk in resp.aiter_bytes():
                     md5.update(chunk)
